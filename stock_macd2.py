@@ -31,51 +31,91 @@ class StockListFetcher:
     @staticmethod
     def fetch_twse_stocks():
         """抓取上市股票清單，回傳 {代號.TW: 中文名稱} 的 dict"""
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
         try:
             url = 'https://isin.twse.com.tw/isin/C_public.jsp?strMode=2'
-            response = requests.get(url, timeout=10)
+            # 關閉 SSL 驗證，加上 headers，增加重試次數
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            response = requests.get(url, headers=headers, verify=False, timeout=30)
             response.encoding = 'big5'
+            
             tables = pd.read_html(StringIO(response.text))
             df = tables[0]
             df = df[df[0].str.contains('　', na=False)]
             df[['stock_code', 'stock_name']] = df[0].str.split('　', n=1, expand=True)
             df = df[df['stock_code'].str.match(r'^\d{4}$', na=False)]
             df['stock_name'] = df['stock_name'].str.strip()
-            # 回傳 dict：{'2330.TW': '台積電', ...}
-            return {f"{r['stock_code']}.TW": r['stock_name'] for _, r in df.iterrows()}
+            
+            stock_dict = {f"{r['stock_code']}.TW": r['stock_name'] for _, r in df.iterrows()}
+            
+            if len(stock_dict) < 100:  # 如果資料太少，可能有問題
+                st.warning(f"⚠️ 上市股票數量異常: {len(stock_dict)} 檔")
+            
+            return stock_dict
+            
         except Exception as e:
-            st.error(f"抓取上市股票失敗: {e}")
+            st.error(f"❌ 抓取上市股票失敗: {str(e)[:200]}")
+            st.info("💡 將使用快速模式的預設清單")
             return {}
     
     @staticmethod
     def fetch_tpex_stocks():
         """抓取上櫃股票清單，回傳 {代號.TWO: 中文名稱} 的 dict"""
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
         try:
             url = 'https://isin.twse.com.tw/isin/C_public.jsp?strMode=4'
-            response = requests.get(url, timeout=10)
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            response = requests.get(url, headers=headers, verify=False, timeout=30)
             response.encoding = 'big5'
+            
             tables = pd.read_html(StringIO(response.text))
             df = tables[0]
             df = df[df[0].str.contains('　', na=False)]
             df[['stock_code', 'stock_name']] = df[0].str.split('　', n=1, expand=True)
             df = df[df['stock_code'].str.match(r'^\d{4}$', na=False)]
             df['stock_name'] = df['stock_name'].str.strip()
-            # 回傳 dict：{'6202.TWO': '盛群', ...}
-            return {f"{r['stock_code']}.TWO": r['stock_name'] for _, r in df.iterrows()}
+            
+            stock_dict = {f"{r['stock_code']}.TWO": r['stock_name'] for _, r in df.iterrows()}
+            
+            if len(stock_dict) < 50:
+                st.warning(f"⚠️ 上櫃股票數量異常: {len(stock_dict)} 檔")
+            
+            return stock_dict
+            
         except Exception as e:
-            st.error(f"抓取上櫃股票失敗: {e}")
+            st.error(f"❌ 抓取上櫃股票失敗: {str(e)[:200]}")
+            st.info("💡 將使用快速模式的預設清單")
             return {}
     
     @staticmethod
     def get_all_tw_stocks():
         """取得所有上市櫃股票，回傳 {代號: 中文名稱} 的 dict"""
-        st.info("正在從證交所抓取最新股票清單...")
+        st.info("🔄 正在從證交所抓取最新股票清單...")
+        
         twse_dict = StockListFetcher.fetch_twse_stocks()
         tpex_dict = StockListFetcher.fetch_tpex_stocks()
+        
+        # 如果都抓取失敗，回退到快速模式
+        if not twse_dict and not tpex_dict:
+            st.warning("⚠️ 無法連線至證交所網站，將使用快速模式預設清單")
+            return StockListFetcher.get_preset_stocks()
+        
         all_dict = {**twse_dict, **tpex_dict}
-        st.success(f"✓ 成功抓取 {len(twse_dict)} 檔上市股票")
-        st.success(f"✓ 成功抓取 {len(tpex_dict)} 檔上櫃股票")
+        
+        if twse_dict:
+            st.success(f"✓ 成功抓取 {len(twse_dict)} 檔上市股票")
+        if tpex_dict:
+            st.success(f"✓ 成功抓取 {len(tpex_dict)} 檔上櫃股票")
         st.success(f"✓ 總計 {len(all_dict)} 檔股票")
+        
         return all_dict
     
     @staticmethod
