@@ -309,7 +309,9 @@ class StockScanner:
         return True, info
 
 
-def scan_all_stocks(stock_dict, progress_bar, status_text, result_container):
+def scan_all_stocks(stock_dict, progress_bar, status_text, result_container,
+                    filter_macd_positive=False, filter_kd_low=False, filter_rsi_low=False,
+                    filter_has_dividend=False, min_dividend_yield=0.0, min_signal_strength=0):
     """掃描所有股票（即時顯示結果），stock_dict = {代號: 中文名稱}"""
     results = []
     stock_list = list(stock_dict.keys())
@@ -357,6 +359,21 @@ def scan_all_stocks(stock_dict, progress_bar, status_text, result_container):
             }
             result.update(info)
             results.append(result)
+
+            # 套用即時篩選條件（與最終表格一致）
+            if filter_macd_positive and result['MACD位階'] != '多頭':
+                continue
+            if filter_kd_low and result.get('月K值', 0) >= 50:
+                continue
+            if filter_rsi_low and result.get('月RSI', 100) >= 60:
+                continue
+            if filter_has_dividend and result['有發股利'] != '✓':
+                continue
+            if min_dividend_yield > 0 and result['殖利率'] < min_dividend_yield:
+                continue
+            if result['訊號強度'] < min_signal_strength:
+                continue
+
             found_count += 1
 
             # 即時顯示（中文名稱、股價、股利、MACD位階、訊號強度）
@@ -537,7 +554,15 @@ def main():
         
         # 執行掃描
         start_time = datetime.now()
-        results = scan_all_stocks(stock_dict, progress_bar, status_text, result_container)
+        results = scan_all_stocks(
+            stock_dict, progress_bar, status_text, result_container,
+            filter_macd_positive=filter_macd_positive,
+            filter_kd_low=filter_kd_low,
+            filter_rsi_low=filter_rsi_low,
+            filter_has_dividend=filter_has_dividend,
+            min_dividend_yield=min_dividend_yield,
+            min_signal_strength=min_signal_strength,
+        )
         elapsed_time = (datetime.now() - start_time).total_seconds()
         
         # 清除進度顯示
