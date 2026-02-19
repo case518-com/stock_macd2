@@ -214,6 +214,46 @@ class StockScanner:
         return data
     
     @staticmethod
+    def get_dividend_info(stock_code):
+        """取得股利資訊"""
+        try:
+            ticker = yf.Ticker(stock_code)
+            dividends = ticker.dividends
+            
+            if dividends is None or len(dividends) == 0:
+                return {'有發股利': False, '近年股利': 0, '殖利率': 0}
+            
+            # 修正1：去除重複索引（yfinance 有時會重複紀錄同一筆股利）
+            dividends = dividends[~dividends.index.duplicated(keep='last')]
+            
+            # 修正2：用明確的 UTC 時間戳篩選近一年，避免 .last() 時區問題
+            one_year_ago = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=365)
+            recent_dividends = dividends[dividends.index >= one_year_ago]
+            recent_div = recent_dividends.sum()
+            
+            # 取得當前股價計算殖利率
+            try:
+                hist = ticker.history(period='5d')
+                if hist.empty:
+                    return {'有發股利': False, '近年股利': 0, '殖利率': 0}
+                current_price = hist['Close'].iloc[-1]
+                dividend_yield = (recent_div / current_price * 100) if current_price > 0 else 0
+            except:
+                dividend_yield = 0
+            
+            # 修正3：殖利率合理性過濾（台股正常範圍約 0~15%，超過 20% 視為資料異常）
+            if dividend_yield > 20:
+                dividend_yield = 0
+            
+            return {
+                '有發股利': recent_div > 0,
+                '近年股利': round(recent_div, 2),
+                '殖利率': round(dividend_yield, 2)
+            }
+        except:
+            return {'有發股利': False, '近年股利': 0, '殖利率': 0}
+    
+    @staticmethod
     def check_first_macd_red(data):
         """檢查是否為月MACD第一根紅K"""
         if len(data) < 2:
@@ -298,10 +338,12 @@ def scan_all_stocks(stock_dict, progress_bar, status_text, result_container):
         is_signal, info = StockScanner.check_first_macd_red(data)
 
         if is_signal:
-            # ✅ 直接用證交所抓來的中文名稱，不再呼叫 Yahoo Finance info
+            # ✅ 直接用證交所抓來的中文名稱
             stock_name = stock_dict.get(stock_code, stock_code)
-            # 產業只在需要時才查（可省略加速掃描）
             industry = 'N/A'
+            
+            # 抓取股利資訊
+            dividend_info = StockScanner.get_dividend_info(stock_code)
 
             result = {
                 '股票代號': stock_code.replace('.TW', '').replace('.TWO', ''),
@@ -309,20 +351,27 @@ def scan_all_stocks(stock_dict, progress_bar, status_text, result_container):
                 '市場': '上市' if stock_code.endswith('.TW') else '上櫃',
                 '現價': round(data['Close'].iloc[-1], 2),
                 '產業': industry,
+                '有發股利': '✓' if dividend_info['有發股利'] else '✗',
+                '近年股利': dividend_info['近年股利'],
+                '殖利率': dividend_info['殖利率'],
             }
             result.update(info)
             results.append(result)
             found_count += 1
 
-            # 即時顯示（中文名稱、股價、MACD位階、訊號強度）
+            # 即時顯示（中文名稱、股價、股利、MACD位階、訊號強度）
             strength = result['訊號強度']
             icon = '💎' if strength >= 4 else '🚀' if strength == 3 else '🔥' if strength == 2 else '⚡' if strength == 1 else '💡'
             macd_tag = '📈多頭' if result['MACD位階'] == '多頭' else '📉空頭'
+            div_icon = '💰' if result['有發股利'] == '✓' else '🚫'
+            div_text = f"殖利率 {result['殖利率']:.1f}%" if result['殖利率'] > 0 else "無股利"
+            
             with result_container:
                 st.success(
                     f"{icon} #{found_count}　"
                     f"**{result['股票代號']}**　{stock_name}　｜　"
-                    f"💰 ${result['現價']:.2f}　｜　"
+                    f"💵 ${result['現價']:.2f}　｜　"
+                    f"{div_icon} {div_text}　｜　"
                     f"{macd_tag}　｜　"
                     f"訊號強度: {'★' * strength}{'☆' * (4 - strength)} ({strength})"
                 )
@@ -430,6 +479,21 @@ def main():
             help="只保留RSI偏低的標的"
         )
         
+        filter_has_dividend = st.checkbox(
+            "只顯示有發股利", 
+            value=False,
+            help="只保留近一年有發放股利的標的"
+        )
+        
+        min_dividend_yield = st.number_input(
+            "最低殖利率 (%)",
+            min_value=0.0,
+            max_value=20.0,
+            value=0.0,
+            step=0.5,
+            help="設定0表示不限制殖利率"
+        )
+        
         min_signal_strength = st.slider(
             "最低訊號強度",
             min_value=0,
@@ -498,6 +562,12 @@ def main():
         
         if filter_rsi_low and '月RSI' in df.columns:
             df = df[df['月RSI'] < 60]
+        
+        if filter_has_dividend:
+            df = df[df['有發股利'] == '✓']
+        
+        if min_dividend_yield > 0:
+            df = df[df['殖利率'] >= min_dividend_yield]
         
         if min_signal_strength > 0:
             df = df[df['訊號強度'] >= min_signal_strength]
