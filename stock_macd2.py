@@ -300,6 +300,9 @@ class StockScanner:
                 confirmations.append('RSI偏低')
         
         histogram = data['MACD_Histogram'].iloc[-1]
+        prev_histogram = data['MACD_Histogram'].iloc[-2]
+        info['當月柱狀體'] = round(histogram, 4)
+        info['前月柱狀體'] = round(prev_histogram, 4)
         if histogram > 0:
             confirmations.append('柱狀體轉正')
         
@@ -308,10 +311,60 @@ class StockScanner:
         
         return True, info
 
+    @staticmethod
+    def check_green_shrink(data):
+        """檢查是否為月MACD綠柱縮短（空方動能減弱，尚未翻紅）"""
+        if len(data) < 3:
+            return False, None
+
+        current_macd = data['MACD'].iloc[-1]
+        curr_h = data['MACD_Histogram'].iloc[-1]
+        prev_h = data['MACD_Histogram'].iloc[-2]
+
+        # 條件：前月綠柱、本月也是綠柱，但本月絕對值比前月小（縮短）
+        if not (prev_h < 0 and curr_h < 0 and abs(curr_h) < abs(prev_h)):
+            return False, None
+
+        confirmations = []
+        if current_macd > 0:
+            confirmations.append('MACD>0')
+
+        info = {
+            '月MACD': round(current_macd, 4),
+            '月Signal': round(data['MACD_Signal'].iloc[-1], 4),
+            '當月柱狀體': round(curr_h, 4),
+            '前月柱狀體': round(prev_h, 4),
+            '縮短幅度': round(abs(prev_h) - abs(curr_h), 4),
+            '縮短比例%': round((abs(prev_h) - abs(curr_h)) / abs(prev_h) * 100, 1),
+            'MACD位階': '多頭' if current_macd > 0 else '空頭',
+        }
+
+        if 'K' in data.columns and 'D' in data.columns:
+            k = data['K'].iloc[-1]
+            d = data['D'].iloc[-1]
+            info['月K值'] = round(k, 2)
+            info['月D值'] = round(d, 2)
+            if k > d:
+                confirmations.append('KD金叉')
+            if k < 30:
+                confirmations.append('K值低檔')
+
+        if 'RSI' in data.columns:
+            rsi = data['RSI'].iloc[-1]
+            info['月RSI'] = round(rsi, 2)
+            if rsi < 50:
+                confirmations.append('RSI偏低')
+
+        info['確認訊號'] = ', '.join(confirmations) if confirmations else '僅綠柱縮短'
+        info['訊號強度'] = len(confirmations)
+
+        return True, info
+
 
 def scan_all_stocks(stock_dict, progress_bar, status_text, result_container,
-                    filter_macd_positive=False, filter_kd_low=False, filter_rsi_low=False,
-                    filter_has_dividend=False, min_dividend_yield=0.0, min_signal_strength=0):
+                    filter_macd_positive=False, filter_green_shrink=False,
+                    filter_has_dividend=False, min_dividend_yield=0.0, min_signal_strength=0,
+                    min_green_shrink_pct=10.0):
     """掃描所有股票（即時顯示結果），stock_dict = {代號: 中文名稱}"""
     results = []
     stock_list = list(stock_dict.keys())
@@ -322,7 +375,6 @@ def scan_all_stocks(stock_dict, progress_bar, status_text, result_container,
         # 更新進度
         progress = idx / total
         progress_bar.progress(progress)
-        # 從 dict 直接取中文名稱顯示在進度列
         cn_name = stock_dict.get(stock_code, '')
         status_text.text(f'掃描進度: {idx}/{total} ({progress*100:.1f}%)  {stock_code} {cn_name}  ｜  已找到 {found_count} 檔')
 
@@ -336,15 +388,14 @@ def scan_all_stocks(stock_dict, progress_bar, status_text, result_container,
         data = StockScanner.calculate_monthly_kd(data)
         data = StockScanner.calculate_monthly_rsi(data)
 
-        # 檢查訊號
-        is_signal, info = StockScanner.check_first_macd_red(data)
+        # 依模式選擇訊號判斷邏輯
+        if filter_green_shrink:
+            is_signal, info = StockScanner.check_green_shrink(data)
+        else:
+            is_signal, info = StockScanner.check_first_macd_red(data)
 
         if is_signal:
-            # ✅ 直接用證交所抓來的中文名稱
             stock_name = stock_dict.get(stock_code, stock_code)
-            industry = 'N/A'
-            
-            # 抓取股利資訊
             dividend_info = StockScanner.get_dividend_info(stock_code)
 
             result = {
@@ -352,20 +403,17 @@ def scan_all_stocks(stock_dict, progress_bar, status_text, result_container,
                 '股票名稱': stock_name,
                 '市場': '上市' if stock_code.endswith('.TW') else '上櫃',
                 '現價': round(data['Close'].iloc[-1], 2),
-                '產業': industry,
+                '產業': 'N/A',
                 '有發股利': '✓' if dividend_info['有發股利'] else '✗',
                 '近年股利': dividend_info['近年股利'],
                 '殖利率': dividend_info['殖利率'],
             }
             result.update(info)
-            results.append(result)
 
-            # 套用即時篩選條件（與最終表格一致）
+            # 即時篩選（先過濾再 append，確保最終表格一致）
             if filter_macd_positive and result['MACD位階'] != '多頭':
                 continue
-            if filter_kd_low and result.get('月K值', 0) >= 50:
-                continue
-            if filter_rsi_low and result.get('月RSI', 100) >= 60:
+            if filter_green_shrink and result.get('縮短比例%', 0) < min_green_shrink_pct:
                 continue
             if filter_has_dividend and result['有發股利'] != '✓':
                 continue
@@ -374,22 +422,24 @@ def scan_all_stocks(stock_dict, progress_bar, status_text, result_container,
             if result['訊號強度'] < min_signal_strength:
                 continue
 
+            results.append(result)
             found_count += 1
 
-            # 即時顯示（中文名稱、股價、股利、MACD位階、訊號強度）
+            # 即時顯示
             strength = result['訊號強度']
             icon = '💎' if strength >= 4 else '🚀' if strength == 3 else '🔥' if strength == 2 else '⚡' if strength == 1 else '💡'
+            mode_tag = '🟢縮短' if filter_green_shrink else '🔴第一紅柱'
             macd_tag = '📈多頭' if result['MACD位階'] == '多頭' else '📉空頭'
             div_icon = '💰' if result['有發股利'] == '✓' else '🚫'
             div_text = f"殖利率 {result['殖利率']:.1f}%" if result['殖利率'] > 0 else "無股利"
-            
+
             with result_container:
                 st.success(
                     f"{icon} #{found_count}　"
                     f"**{result['股票代號']}**　{stock_name}　｜　"
                     f"💵 ${result['現價']:.2f}　｜　"
                     f"{div_icon} {div_text}　｜　"
-                    f"{macd_tag}　｜　"
+                    f"{macd_tag}　｜　{mode_tag}　｜　"
                     f"訊號強度: {'★' * strength}{'☆' * (4 - strength)} ({strength})"
                 )
 
@@ -479,24 +529,28 @@ def main():
         # 篩選條件
         st.subheader("🎯 進階篩選")
         
-        filter_macd_positive = st.checkbox(
-            "只顯示MACD>0（多頭）", 
-            value=True,
-            help="只保留MACD在0軸上方的標的"
+        macd_scan_mode = st.radio(
+            "📡 掃描訊號模式",
+            ["🔴 第一根紅柱", "📈 MACD>0（多頭）", "🟢 綠柱縮短（預警）"],
+            index=0,
+            help="🔴第一根紅柱：柱狀體從負轉正 | 📈MACD>0：限多頭位階的第一根紅柱 | 🟢綠柱縮短：空方動能減弱的預警，比紅柱早一個月"
         )
+        filter_macd_positive = (macd_scan_mode == "📈 MACD>0（多頭）")
+        filter_green_shrink  = (macd_scan_mode == "🟢 綠柱縮短（預警）")
         
-        filter_kd_low = st.checkbox(
-            "只顯示K值<50", 
-            value=False,
-            help="只保留K值在中低檔的標的"
-        )
-        
-        filter_rsi_low = st.checkbox(
-            "只顯示RSI<60", 
-            value=False,
-            help="只保留RSI偏低的標的"
-        )
-        
+        # 綠柱縮短模式才顯示縮短比例設定
+        if macd_scan_mode == "🟢 綠柱縮短（預警）":
+            min_green_shrink_pct = st.number_input(
+                "最小縮短比例 (%)",
+                min_value=0.0,
+                max_value=80.0,
+                value=10.0,
+                step=5.0,
+                help="本月綠柱相比前月縮短的最小幅度，例如設10%表示前月-10、本月至少要縮到-9以內才算"
+            )
+        else:
+            min_green_shrink_pct = 0.0
+
         filter_has_dividend = st.checkbox(
             "只顯示有發股利", 
             value=True,
@@ -527,6 +581,13 @@ def main():
         else:
             st.warning("⚠️ 完整模式：掃描全部上市櫃，約需30-60分鐘！")
         
+        if macd_scan_mode == "🟢 綠柱縮短（預警）":
+            st.info("🟢 綠柱縮短：掃描空方動能減弱的股票，比第一根紅柱早一個月出現")
+        elif macd_scan_mode == "📈 MACD>0（多頭）":
+            st.info("📈 MACD>0：只掃描MACD在零軸以上的第一根紅柱")
+        else:
+            st.info("🔴 第一根紅柱：柱狀體從負轉正，不限MACD位階")
+        
         # 開始掃描按鈕
         start_scan = st.button("🚀 開始掃描", type="primary", use_container_width=True)
     
@@ -549,7 +610,7 @@ def main():
         status_text = st.empty()
         
         # 即時結果顯示區
-        st.markdown("### 🔍 掃描中...（即時結果）")
+        st.markdown(f"### 🔍 掃描中...（{macd_scan_mode} 模式，即時結果）")
         result_container = st.container()
         
         # 執行掃描
@@ -557,11 +618,11 @@ def main():
         results = scan_all_stocks(
             stock_dict, progress_bar, status_text, result_container,
             filter_macd_positive=filter_macd_positive,
-            filter_kd_low=filter_kd_low,
-            filter_rsi_low=filter_rsi_low,
+            filter_green_shrink=filter_green_shrink,
             filter_has_dividend=filter_has_dividend,
             min_dividend_yield=min_dividend_yield,
             min_signal_strength=min_signal_strength,
+            min_green_shrink_pct=min_green_shrink_pct,
         )
         elapsed_time = (datetime.now() - start_time).total_seconds()
         
@@ -583,12 +644,6 @@ def main():
         if filter_macd_positive:
             df = df[df['MACD位階'] == '多頭']
         
-        if filter_kd_low and '月K值' in df.columns:
-            df = df[df['月K值'] < 50]
-        
-        if filter_rsi_low and '月RSI' in df.columns:
-            df = df[df['月RSI'] < 60]
-        
         if filter_has_dividend:
             df = df[df['有發股利'] == '✓']
         
@@ -598,10 +653,19 @@ def main():
         if min_signal_strength > 0:
             df = df[df['訊號強度'] >= min_signal_strength]
         
+        if filter_green_shrink and '縮短比例%' in df.columns and min_green_shrink_pct > 0:
+            df = df[df['縮短比例%'] >= min_green_shrink_pct]
+        
         filtered_count = len(df)
         
         # 依訊號強度和交叉力道排序
-        df = df.sort_values(['訊號強度', '交叉力道'], ascending=[False, False])
+        # 綠柱縮短模式用「縮短幅度」排序，其他模式用「交叉力道」排序
+        if '交叉力道' in df.columns:
+            df = df.sort_values(['訊號強度', '交叉力道'], ascending=[False, False])
+        elif '縮短幅度' in df.columns:
+            df = df.sort_values(['訊號強度', '縮短幅度'], ascending=[False, False])
+        else:
+            df = df.sort_values(['訊號強度'], ascending=[False])
         
         st.success(f"✅ 掃描完成！找到 {original_count} 檔，篩選後剩 {filtered_count} 檔")
         st.info(f"⏱️ 耗時 {elapsed_time:.1f} 秒 ({elapsed_time/60:.1f} 分鐘)")
